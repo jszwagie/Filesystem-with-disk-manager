@@ -71,15 +71,15 @@ unsigned calculate_number_of_blocks(unsigned given_size) {
 
 
 void show_binary(const char *filename, const char *binary_filename) {
+    int byte_count = 0;
+    uint8_t byte;
     FILE *disk = fopen(filename, "rb");
     FILE *binary = fopen(binary_filename, "w");
     if (!disk) {
         perror("Error opening virtual disk");
         exit(EXIT_FAILURE);
     }
-    int byte_count = 0;
     while (!feof(disk)) {
-        uint8_t byte;
         fread(&byte, sizeof(uint8_t), 1, disk);
         fprintf(binary, "%02X ", byte); // Wypisanie bajtu w formacie szesnastkowym
         byte_count++;
@@ -92,18 +92,17 @@ void show_binary(const char *filename, const char *binary_filename) {
 
 
 void create_virtual_disk(const char *filename, unsigned size) {
+    unsigned num_blocks = calculate_number_of_blocks(size);
+    unsigned padding_for_bitmap = num_blocks + 8 - num_blocks % 8 - num_blocks;
+    DiskHeader header;
+
     FILE *disk = fopen(filename, "wb");
     if (!disk) {
         perror("Error creating virtual disk");
         exit(EXIT_FAILURE);
     }
-
-    unsigned num_blocks = calculate_number_of_blocks(size);
     // calculate padding, add padding to the number of blocks
-    unsigned padding_for_bitmap = num_blocks + 8 - num_blocks % 8 - num_blocks;
-    printf("padding: %u\n", padding_for_bitmap);
 
-    DiskHeader header;
     header.disk_size = size;
     header.max_files = num_blocks;
     header.file_count = 0;
@@ -113,8 +112,20 @@ void create_virtual_disk(const char *filename, unsigned size) {
     header.catalog_addr = sizeof(DiskHeader) + num_blocks + padding_for_bitmap;
     header.catalog_size = num_blocks * sizeof(FileEntry);
 
-    uint8_t block_bitmap[num_blocks + padding_for_bitmap];
-    FileEntry catalog[num_blocks];
+    uint8_t *block_bitmap = malloc(num_blocks + padding_for_bitmap);
+    if (!block_bitmap) {
+        perror("Error allocating memory for block bitmap");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
+
+    FileEntry *catalog = malloc(num_blocks * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        free(block_bitmap);
+        exit(EXIT_FAILURE);
+    }
     memset(block_bitmap, 0, num_blocks + padding_for_bitmap);
     memset(catalog, 0, num_blocks * sizeof(FileEntry));
 
@@ -123,18 +134,21 @@ void create_virtual_disk(const char *filename, unsigned size) {
     fwrite(catalog, num_blocks * sizeof(FileEntry), 1, disk);
 
     fclose(disk);
+    free(block_bitmap);
+    free(catalog);
 
 }
 
 
 void display_disk(const char *filename) {
+    DiskHeader header;
+    uint8_t block_status;
     FILE *disk = fopen(filename, "rb");
     if (!disk) {
         perror("Error opening virtual disk");
         exit(EXIT_FAILURE);
     }
 
-    DiskHeader header;
     fread(&header, sizeof(DiskHeader), 1, disk);
 
     printf("=== Disk Header ===\n");
@@ -154,7 +168,6 @@ void display_disk(const char *filename) {
     while (i > 0) {
         printf("|");
         for (unsigned row = 0; row < 100; row++) {
-            uint8_t block_status;
             fread(&block_status, sizeof(uint8_t), 1, disk);
             if (block_status == 0) {
                 printf("0");
@@ -317,9 +330,6 @@ void copy_file_to_disk(const char *diskname, const char *filenamebase) {
         }
     }
 
-    // make a copy of block bitmap
-    uint8_t block_bitmap_copy[header.max_files];
-    memcpy(block_bitmap_copy, block_bitmap, header.max_files);
 
     // Update catalog
     // find first free catalog entry
@@ -333,10 +343,12 @@ void copy_file_to_disk(const char *diskname, const char *filenamebase) {
 
 
     catalog[catalog_entry].name_type = 0;
-    printf("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&\n");
-    printf("name: %s\n", filename);
     catalog[catalog_entry].name_addr = map_name_to_uint(filename);
-    catalog[catalog_entry].file_type = 0;
+    if (filename[0] == '.') {
+        catalog[catalog_entry].file_type = 1;
+    } else {
+        catalog[catalog_entry].file_type = 0;
+    }
     catalog[catalog_entry].file_size = file_size;
     catalog[catalog_entry].first_block_addr = first_block;
 
@@ -356,7 +368,7 @@ void copy_file_to_disk(const char *diskname, const char *filenamebase) {
 
     // Write block bitmap back
     fseek(disk, sizeof(DiskHeader), SEEK_SET);
-    fwrite(block_bitmap_copy, sizeof(uint8_t), header.max_files, disk);
+    fwrite(block_bitmap, sizeof(uint8_t), header.max_files, disk);
 
     // Write catalog back
     fseek(disk, header.catalog_addr, SEEK_SET);
@@ -384,12 +396,24 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
 
     // Read block bitmap
     fseek(disk, sizeof(DiskHeader), SEEK_SET);
-    uint8_t block_bitmap[header.max_files];
+    uint8_t *block_bitmap = malloc(header.max_files * sizeof(uint8_t));
+    if (!block_bitmap) {
+        perror("Error allocating memory for block bitmap");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
     fread(block_bitmap, sizeof(uint8_t), header.max_files, disk);
 
     // Read catalog
     fseek(disk, header.catalog_addr, SEEK_SET);
-    FileEntry catalog[header.file_count];
+
+    FileEntry *catalog = malloc(header.file_count * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        free(block_bitmap);
+        exit(EXIT_FAILURE);
+    }
     for (unsigned i = 0; i < header.file_count; i++) {
         fread(&catalog[i], sizeof(FileEntry), 1, disk);
     }
@@ -418,9 +442,6 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
         current_block = next_block;
     }
 
-    // make a copy of block bitmap
-    uint8_t block_bitmap_copy[header.max_files];
-    memcpy(block_bitmap_copy, block_bitmap, header.max_files);
 
     // mark catalog entry as free
     catalog[file_index].file_size = 0;
@@ -440,7 +461,7 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
 
     // Write block bitmap back
     fseek(disk, sizeof(DiskHeader), SEEK_SET);
-    fwrite(block_bitmap_copy, sizeof(uint8_t), header.max_files, disk);
+    fwrite(block_bitmap, sizeof(uint8_t), header.max_files, disk);
 
     // Write catalog back
     fseek(disk, header.catalog_addr, SEEK_SET);
@@ -449,6 +470,8 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
     }
 
     fclose(disk);
+    free(catalog);
+    free(block_bitmap);
 }
 
 void copy_file_outside(const char *diskname, const char *filename) {
@@ -464,12 +487,23 @@ void copy_file_outside(const char *diskname, const char *filename) {
 
     // Read block bitmap
     fseek(disk, sizeof(DiskHeader), SEEK_SET);
-    uint8_t block_bitmap[header.max_files];
+    uint8_t *block_bitmap = malloc(header.max_files * sizeof(uint8_t));
+    if (!block_bitmap) {
+        perror("Error allocating memory for block bitmap");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
     fread(block_bitmap, sizeof(uint8_t), header.max_files, disk);
 
     // Read catalog
     fseek(disk, header.catalog_addr, SEEK_SET);
-    FileEntry catalog[header.file_count];
+    FileEntry *catalog = malloc(header.file_count * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        free(block_bitmap);
+        exit(EXIT_FAILURE);
+    }
     for (unsigned i = 0; i < header.file_count; i++) {
         fread(&catalog[i], sizeof(FileEntry), 1, disk);
     }
@@ -508,6 +542,9 @@ void copy_file_outside(const char *diskname, const char *filename) {
     }
 
     fclose(disk);
+    fclose(dest_file);
+    free(catalog);
+    free(block_bitmap);
 
 }
 
