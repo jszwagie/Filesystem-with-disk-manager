@@ -42,7 +42,8 @@ unsigned min(unsigned a, unsigned b) {
 
 uint32_t map_name_to_uint(const char *str) {
     uint32_t result = 0;
-    for (unsigned i = 0; i < 4 && i < strlen(str); i++) {
+    unsigned len = strlen(str);
+    for (unsigned i = 0; i < 4 && i < len; i++) {
         result |= ((uint8_t)str[i] << (8 * i));
     }
     return result;
@@ -190,7 +191,12 @@ void display_disk(const char *filename) {
 }
 
 
-void copy_file_to_disk(const char *diskname, const char *filename) {
+void copy_file_to_disk(const char *diskname, const char *filenamebase) {
+    //copy const char *filenamebase to *filename
+
+    char filename[4];
+    strcpy(filename, filenamebase);
+
     FILE *disk = fopen(diskname, "rb+");
     if (!disk) {
         perror("Error opening virtual disk");
@@ -221,11 +227,19 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
     uint32_t file_size = ftell(src_file);
     fseek(src_file, 0, SEEK_SET);
 
-    unsigned required_blocks = (file_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    unsigned data_per_block = BLOCK_SIZE - 5; // Odejmij miejsce na wskaźnik
+    unsigned required_blocks = (file_size + data_per_block - 1) / data_per_block;
+
 
     // Read block bitmap
     fseek(disk, sizeof(DiskHeader), SEEK_SET);
-    uint8_t block_bitmap[header.max_files];
+    uint8_t *block_bitmap = malloc(header.max_files * sizeof(uint8_t));
+    if (!block_bitmap) {
+        perror("Error allocating memory for block bitmap");
+        fclose(disk);
+        fclose(src_file);
+        exit(EXIT_FAILURE);
+    }
     fread(block_bitmap, sizeof(uint8_t), header.max_files, disk);
 
 
@@ -244,7 +258,13 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
 
     // Read catalog
     fseek(disk, header.catalog_addr, SEEK_SET);
-    FileEntry catalog[header.file_count];
+    FileEntry *catalog = malloc(header.file_count * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        fclose(src_file);
+        exit(EXIT_FAILURE);
+    }
     for (unsigned i = 0; i < header.file_count; i++) {
         fread(&catalog[i], sizeof(FileEntry), 1, disk);
     }
@@ -254,31 +274,45 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
     unsigned current_block = first_block;
     unsigned next_free_block = 0;
     unsigned prev_block = 0;
+    unsigned file_size_copy = file_size;
+    unsigned i = 0;
 
-    for (unsigned i = 0; i < required_blocks; i++) {
+    printf("required_blocks: %u\n", required_blocks);
+    while (1) {
 
         // write data
         Block block = {0};
         block.block_type = 0;
-        block.next_block_addr = 0;
+        if (file_size_copy > BLOCK_SIZE - 5) {
+            // find next free block
+            for (unsigned j = i+1; j < header.max_files; j++) {
+                if (block_bitmap[j] == 0) {
+                    next_free_block = j;
+                    break;
+                }
+            }
+        } else next_free_block = 0;
+
+
+        if (next_free_block == 0) {
+            block.next_block_addr = 0;
+        } else block.next_block_addr = first_block + next_free_block * BLOCK_SIZE;
+
         fread(block.data, sizeof(uint8_t), BLOCK_SIZE - 5, src_file);
         fseek(disk, current_block, SEEK_SET);
         fwrite(&block, sizeof(Block), 1, disk);
         block_bitmap[(current_block - header.first_block_addr)/BLOCK_SIZE] = 1;
-        required_blocks--;
-
-        // find next free block
-        for (unsigned j = i; j < header.max_files; j++) {
-            if (block_bitmap[j] == 0) {
-                next_free_block = j;
-                break;
-            }
-        }
+        printf("current_block: %u\n", current_block);
+        printf("header_first: %u\n", header.first_block_addr);
+        printf("next_free_block: %u\n", next_free_block);
+        printf("saved block %u\n", (current_block - header.first_block_addr)/BLOCK_SIZE);
+        i++;
 
         prev_block = current_block;
         current_block = first_block + next_free_block * BLOCK_SIZE;
-
-        if (required_blocks == 0) {
+        file_size_copy -= min(BLOCK_SIZE - 5, file_size_copy);
+        printf("file_size_copy: %u\n", file_size_copy);
+        if (file_size_copy <= 0) {
             break;
         }
     }
@@ -286,7 +320,6 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
     // make a copy of block bitmap
     uint8_t block_bitmap_copy[header.max_files];
     memcpy(block_bitmap_copy, block_bitmap, header.max_files);
-
 
     // Update catalog
     // find first free catalog entry
@@ -300,13 +333,22 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
 
 
     catalog[catalog_entry].name_type = 0;
+    printf("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&\n");
+    printf("name: %s\n", filename);
     catalog[catalog_entry].name_addr = map_name_to_uint(filename);
     catalog[catalog_entry].file_type = 0;
     catalog[catalog_entry].file_size = file_size;
     catalog[catalog_entry].first_block_addr = first_block;
 
     header.file_count++;
-    header.first_free_block = first_block + next_free_block * BLOCK_SIZE;
+    // find freee block
+    for (unsigned j = 0; j < header.max_files; j++) {
+        if (block_bitmap[j] == 0) {
+            next_free_block = j;
+            break;
+        }
+    }
+    header.first_free_block = header.first_block_addr + next_free_block * BLOCK_SIZE;
     // Write header back
     fseek(disk, 0, SEEK_SET);
     fwrite(&header, sizeof(DiskHeader), 1, disk);
@@ -324,6 +366,8 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
 
     fclose(disk);
     fclose(src_file);
+    free(catalog);
+    free(block_bitmap);
 
 }
 
@@ -470,17 +514,19 @@ void copy_file_outside(const char *diskname, const char *filename) {
 
 int main() {
     unsigned size = 131072;
-    printf("Number of blocks: %u\n", calculate_number_of_blocks(size));
+    printf("============Creating disk============\n");
     create_virtual_disk("disk", size);
     display_disk("disk");
+    printf("============Copying file to disk============\n");
     copy_file_to_disk("disk", "v.s");
     display_disk("disk");
 
-    // remove file from our catalog on linux to allow copying it again
+    //remove file from our catalog on linux to allow copying it again
     remove("v.s");
-
+    printf("============Copying file outside============\n");
     copy_file_outside("disk", "v.s");
     printf("File copied\n");
+    printf("============Removing file from disk============\n");
     remove_file_from_disk("disk", "v.s");
     display_disk("disk");
     return 0;
