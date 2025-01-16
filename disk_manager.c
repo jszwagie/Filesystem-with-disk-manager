@@ -32,6 +32,32 @@ typedef struct {
     uint8_t data[BLOCK_SIZE - 5];
 } Block; // 5 bytes
 
+typedef struct {
+    uint8_t block_type; // 0: file, 1: name
+    uint32_t next_block_addr;
+    uint32_t name_count;
+    uint8_t data[BLOCK_SIZE - 9];
+} NameBlock;
+
+
+uint32_t map_name_to_uint(const char *str) {
+    uint32_t result = 0;
+    for (unsigned i = 0; i < 4 && i < strlen(str); i++) {
+        result |= ((uint8_t)str[i] << (8 * i));
+    }
+    return result;
+}
+
+char* map_uint_to_str(uint32_t addr) {
+    static char str[5];
+    for (int i = 0; i < 4; i++) {
+        str[i] = (char)((addr >> (8 * i)) & 0xFF);
+    }
+    str[4] = '\0';
+    return str;
+}
+
+
 unsigned calculate_number_of_blocks(unsigned given_size) { // in bytes
     int is_enough = 0;
     int temp_size;
@@ -116,7 +142,13 @@ void display_disk(const char *filename) {
         for (unsigned row = 0; row < 100; row++) {
             uint8_t block_status;
             fread(&block_status, sizeof(uint8_t), 1, disk);
-            printf("%s", block_status ? "X" : "0");
+            if (block_status == 0) {
+                printf("0");
+            } else if (block_status == 1) {
+                printf("X");
+            } else {
+                printf("N");
+            }
             i--;
             if (i == 0) {
                 break;
@@ -128,19 +160,28 @@ void display_disk(const char *filename) {
 
     printf("\n=== Catalog ===\n");
     fseek(disk, header.catalog_addr, SEEK_SET);
-    for (unsigned i = 0; i < header.max_files; i++) {
+    for (unsigned i = 0; i < header.file_count; i++) {
         FileEntry entry;
         fread(&entry, sizeof(FileEntry), 1, disk);
-        if (entry.file_size > 0) {
-            printf("File %u:\n", i + 1);
-            printf("  Type: %s\n", entry.file_type ? "Hidden" : "Regular");
-            printf("  Size: %u bytes\n", entry.file_size);
-            printf("  First block address: %u\n", entry.first_block_addr);
+        printf("File %u:\n", i + 1);
+        printf("  Type: %s\n", entry.file_type ? "Hidden" : "Regular");
+        printf("  Size: %u bytes\n", entry.file_size);
+        printf("  First block address: %u\n", entry.first_block_addr);
+        printf("  Name type: %s\n", entry.name_type ? "Addressable" : "Inline");
+        //Print name
+        char name[MAX_FILENAME_BYTES] = {0};
+        if (entry.name_type == 0) { // Inline name
+            strncpy(name, map_uint_to_str(entry.name_addr), MAX_FILENAME_BYTES);
+        } else { // Addressed name
+            fseek(disk, entry.name_addr, SEEK_SET);
+            fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
+            name[MAX_FILENAME_BYTES - 1] = '\0'; // Ensure null-termination
         }
+        printf("  Name: %s\n", name);
     }
-
-
 }
+
+
 
 void ls(const char *filename, char arg) {
     FILE *disk = fopen(filename, "rb");
@@ -153,39 +194,36 @@ void ls(const char *filename, char arg) {
     fread(&header, sizeof(DiskHeader), 1, disk);
 
     fseek(disk, header.catalog_addr, SEEK_SET);
-    for (unsigned i = 0; i < header.max_files; i++) {
+    for (unsigned i = 0; i < header.file_count; i++) {
         FileEntry entry;
         fread(&entry, sizeof(FileEntry), 1, disk);
         if (entry.file_size > 0) {
-            if (arg == 's') {
-                if (entry.file_type == 0)
-                    printf("%u", entry.name_addr);
-                    printf(" %u b", entry.file_size);
-                    printf("\n");
-            }
-            else if (arg == 'a') {
-                printf("%u", entry.name_addr);
-                printf("\n");
-            }
-            else
-            {
-                if (entry.file_type == 0)
-                    printf("%u", entry.name_addr);
-                    printf("\n");
+            char name[MAX_FILENAME_BYTES] = {0};
+            if (entry.name_type == 0) { // Inline name
+                strncpy(name, map_uint_to_str(entry.name_addr), MAX_FILENAME_BYTES);
+            } else { // Addressed name
+                fseek(disk, entry.name_addr, SEEK_SET);
+                fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
+                name[MAX_FILENAME_BYTES - 1] = '\0'; // Ensure null-termination
             }
 
+            if (arg == 's') { // Regular files only
+                if (entry.file_type == 0) {
+                    printf("%s %u bytes\n", name, entry.file_size);
+                }
+            } else if (arg == 'a') { // All files, including hidden
+                printf("%s %u bytes\n", name, entry.file_size);
+            } else { // Default: Regular files
+                if (entry.file_type == 0) {
+                    printf("%s %u bytes\n", name, entry.file_size);
+                }
+            }
         }
     }
+
+    fclose(disk);
 }
 
-uint32_t hash(const char *str) {
-    uint32_t hash = 5381;
-    int c;
-    while ((c = *str++)) {
-        hash = ((hash << 5) + hash) + c;
-    }
-    return hash;
-}
 
 
 void copy_to_virtual_disk(const char *diskname, const char *filename) {
@@ -255,7 +293,7 @@ void copy_to_virtual_disk(const char *diskname, const char *filename) {
     for (unsigned i = 0; i < required_blocks; i++) {
 
         // write data
-        Block block;
+        Block block = {0};
         block.block_type = 0;
         block.next_block_addr = first_block + next_free_block * BLOCK_SIZE;
         fread(block.data, sizeof(uint8_t), BLOCK_SIZE - 5, src_file);
@@ -289,11 +327,42 @@ void copy_to_virtual_disk(const char *diskname, const char *filename) {
             break;
         }
     }
+    // save name in name block
+    if (strlen(filename) > 4) {// filename length
+        // file name saved in block of names
+        catalog[catalog_entry].name_type = 1;
+        fseek(disk, header.name_block_addr, SEEK_SET);
+        if (header.name_block_addr == 0) {
+            header.name_block_addr = header.first_block_addr + next_free_block * BLOCK_SIZE;
+            fseek(disk, header.name_block_addr, SEEK_SET);
+            // write name block
+            NameBlock name_block = {0};
+            name_block.block_type = 1;
+            name_block.next_block_addr = 0;
+            name_block.name_count = 1;
+            strcpy((char *)name_block.data, filename);
+            fwrite(&name_block, sizeof(NameBlock), 1, disk);
+            block_bitmap[next_free_block] = 2;
+            catalog[catalog_entry].name_addr = header.name_block_addr + 9;
+            catalog[catalog_entry].name_type = 1;
+            // find next first free block
+            for (unsigned j = header.name_block_addr/BLOCK_SIZE; j < header.max_files; j++) {
+            if (block_bitmap[j] == 0) {
+                next_free_block = j;
+                break;
+            }
+        }
+        }
+    }
+    else {
+        catalog[catalog_entry].name_type = 0;
+        catalog[catalog_entry].name_addr = map_name_to_uint(filename);
+    }
+
+
     catalog[catalog_entry].file_type = 0;
     catalog[catalog_entry].file_size = file_size;
     catalog[catalog_entry].first_block_addr = first_block;
-    catalog[catalog_entry].name_type = 0;
-    catalog[catalog_entry].name_addr = hash(filename);
 
 
     // Update header
@@ -327,9 +396,9 @@ void copy_to_virtual_disk(const char *diskname, const char *filename) {
 }
 
 
-void show_binary(const char *filename) {
+void show_binary(const char *filename, const char *binary_filename) {
     FILE *disk = fopen(filename, "rb");
-    FILE *binary = fopen("binary.txt", "w");
+    FILE *binary = fopen(binary_filename, "w");
     if (!disk) {
         perror("Error opening virtual disk");
         exit(EXIT_FAILURE);
@@ -346,12 +415,14 @@ void show_binary(const char *filename) {
 
 
 int main() {
-    unsigned size = 1048576;
+    unsigned size = 131072;
     create_virtual_disk("disk", size);
+    //show_binary("disk", "cration.txt");
     display_disk("disk");
+    copy_to_virtual_disk("disk", "v.s");
+    //show_binary("disk", "x_copied.txt");
     copy_to_virtual_disk("disk", "x.txt");
-    show_binary("disk");
-    ls("disk", 's');
+    //show_binary("disk", "v_copied.txt");
     display_disk("disk");
     return 0;
 }

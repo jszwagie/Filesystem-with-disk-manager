@@ -5,3 +5,5 @@ disk.iso
 disk_manager
 x.txt
 wskazowki.txt
+*.txt
+*.s
