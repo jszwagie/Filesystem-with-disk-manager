@@ -33,6 +33,11 @@ typedef struct {
     uint8_t data[BLOCK_SIZE - 5];
 } Block; // 4096 bytes
 
+unsigned min(unsigned a, unsigned b) {
+    return a < b ? a : b;
+}
+
+
 // Name Block will be implemented in the next version
 
 uint32_t map_name_to_uint(const char *str) {
@@ -402,15 +407,81 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
     fclose(disk);
 }
 
+void copy_file_outside(const char *diskname, const char *filename) {
+    FILE *disk = fopen(diskname, "rb+");
+    if (!disk) {
+        perror("Error opening virtual disk");
+        exit(EXIT_FAILURE);
+    }
+
+    // Read disk header
+    DiskHeader header = {0};
+    fread(&header, sizeof(DiskHeader), 1, disk);
+
+    // Read block bitmap
+    fseek(disk, sizeof(DiskHeader), SEEK_SET);
+    uint8_t block_bitmap[header.max_files];
+    fread(block_bitmap, sizeof(uint8_t), header.max_files, disk);
+
+    // Read catalog
+    fseek(disk, header.catalog_addr, SEEK_SET);
+    FileEntry catalog[header.file_count];
+    for (unsigned i = 0; i < header.file_count; i++) {
+        fread(&catalog[i], sizeof(FileEntry), 1, disk);
+    }
+
+    // find file in catalog
+    unsigned file_index = 0;
+    for (unsigned i = 0; i < header.file_count; i++) {
+        if (catalog[i].name_addr == map_name_to_uint(filename)) {
+            file_index = i;
+            break;
+        }
+    }
+
+    // find first block of the file
+    unsigned first_block = catalog[file_index].first_block_addr;
+    unsigned current_block = first_block;
+    unsigned next_block = 0;
+
+    FILE *dest_file = fopen(filename, "wb");
+    if (!dest_file) {
+        perror("Error opening destination file");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
+
+    unsigned file_size = catalog[file_index].file_size;
+    // copy data
+    while (current_block != 0) {
+        fseek(disk, current_block, SEEK_SET);
+        Block block = {0};
+        fread(&block, sizeof(Block), 1, disk);
+        next_block = block.next_block_addr;
+        fwrite(block.data, sizeof(uint8_t), min(BLOCK_SIZE - 5, file_size), dest_file);
+        file_size -= min(BLOCK_SIZE - 5, file_size);
+        current_block = next_block;
+    }
+
+    fclose(disk);
+
+}
+
 
 int main() {
     unsigned size = 131072;
     printf("Number of blocks: %u\n", calculate_number_of_blocks(size));
     create_virtual_disk("disk", size);
     display_disk("disk");
-    copy_file_to_disk("disk", "v.ss");
+    copy_file_to_disk("disk", "v.s");
     display_disk("disk");
-    remove_file_from_disk("disk", "v.ss");
+
+    // remove file from our catalog on linux to allow copying it again
+    remove("v.s");
+
+    copy_file_outside("disk", "v.s");
+    printf("File copied\n");
+    remove_file_from_disk("disk", "v.s");
     display_disk("disk");
     return 0;
 }
