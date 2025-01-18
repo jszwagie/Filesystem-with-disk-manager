@@ -860,7 +860,8 @@ void ls(const char *diskname, char arg) {
 
 
 void bad_usage() {
-    printf("Usage: ./disk_manager <command> <diskname> <args>\n");
+    printf("Usage: ./disk_manager <command> <args>\n");
+    printf("For more information, check the manual");
     exit(EXIT_FAILURE);
 }
 
@@ -870,8 +871,9 @@ void man() {
     printf("  - create <diskname> <size> # create virtual disk\n");
     printf("  - cp <-in/-out> <filename> # copy file to/from disk\n");
     printf("  - rm <filename> # remove file from disk\n");
-    printf("  - unmount <diskname> # remove virtual disk\n");
-    printf("  - info <diskname> # display disk info\n");
+    printf("  - mount <diskname> # mount virtual disk\n");
+    printf("  - unmount # remove virtual disk\n");
+    printf("  - info # display disk info\n");
     printf("  - ls <-a> # list files\n");
 }
 
@@ -882,11 +884,73 @@ int main(int argc, char *argv[]) {
     - create <diskname> <size> # create virtual disk
     - cp <-in/-out> <filename> # copy file to/from disk
     - rm <filename> # remove file from disk
-    - unmount <diskname> # remove virtual disk
-    - info <diskname> # display disk info
+    - mount <diskname> # mount virtual disk
+    - unmount # remove virtual disk
+    - info # display disk info
     - ls <-a> # list files
     - man # display manual
     */
-    return 0;
+    if (argc < 2) {
+        bad_usage();
+    }
 
+    if (strcmp(argv[1], "create")) {
+        //handle create
+        if (argc != 4) bad_usage();
+        create_virtual_disk(argv[2], atoi(argv[3]));
+    }
+    else if (strcmp(argv[1], "cp")) {
+        //handle cp
+        if (argc != 4) bad_usage();
+        if (strcmp(argv[2], "-in")) {
+            copy_file_to_disk(load_config("config.txt"), argv[3]);
+        } else if (strcmp(argv[2], "-out")) {
+            copy_file_outside(load_config("config.txt"), argv[3]);
+        } else {
+            bad_usage();
+        }
+        unload_config(load_config("config.txt"));
+    }
+    else if (strcmp(argv[1], "rm")) {
+        //handle rm
+        if (argc != 3) bad_usage();
+        remove_file_from_disk(load_config("config.txt"), argv[2]);
+        unload_config(load_config("config.txt"));
+    }
+    else if (strcmp(argv[1], "mount")) {
+        //handle mount
+        if (argc != 3) bad_usage();
+        save_config(argv[2], "config.txt");
+    }
+    else if (strcmp(argv[1], "unmount")) {
+        //handle unmount
+        if (argc != 2) bad_usage();
+        remove_disk(load_config("config.txt"));
+        clear_config("config.txt");
+        unload_config(load_config("config.txt"));
+    }
+    else if (strcmp(argv[1], "info")) {
+        //handle info
+        if (argc != 2) bad_usage();
+        display_disk(load_config("config.txt"));
+        unload_config(load_config("config.txt"));
+    }
+    else if (strcmp(argv[1], "ls")) {
+        //handle ls
+        if (argc > 3) bad_usage();
+        if (argc == 2) {
+            ls(load_config("config.txt"), 'n');
+        } else {
+            if (strcmp(argv[2], "-a")) {
+                bad_usage();
+            }
+            ls(load_config("config.txt"), 'a');
+        }
+        unload_config(load_config("config.txt"));
+
+    }
+    else if (strcmp(argv[1], "man")) {
+        man();
+    }
+    return 0;
 }
