@@ -215,7 +215,7 @@ void display_disk(const char *filename) {
     unsigned i = header.max_files;
     while (i > 0) {
         printf("|");
-        for (unsigned row = 0; row < 100; row++) {
+        for (unsigned row = 0; row < 25; row++) {
             fread(&block_status, sizeof(uint8_t), 1, disk);
             if (block_status == 0) {
                 printf("0");
@@ -494,7 +494,7 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
 }
 
 
-void remove_filename_from_disk(FILE *disk,  DiskHeader *header, const char *filename, uint8_t *block_bitmap) {
+void remove_filename_from_disk(FILE *disk,  DiskHeader *header, const char *filename, FileEntry *catalog, uint8_t *block_bitmap) {
 
     unsigned name_index = 0;
     unsigned first_block = header->name_block_addr;
@@ -526,7 +526,20 @@ void remove_filename_from_disk(FILE *disk,  DiskHeader *header, const char *file
     for (unsigned i = name_index; i < name_block.name_count - 1; i++) {
         name_block.names[i] = name_block.names[i + 1];
     }
+    // adjust name count
     name_block.name_count--;
+
+    // adjust name pointers in catalog
+    unsigned removed_name_addr = current_block + (name_index * sizeof(FileName)) + 3 * sizeof(uint32_t);
+    unsigned name_addr = 0;
+    for (unsigned i = 0; i < header->file_count; i++) {
+        if (catalog[i].name_type == 1) {
+            name_addr = catalog[i].name_addr;
+            if (name_addr > removed_name_addr && name_addr < current_block + BLOCK_SIZE && name_addr > current_block) {
+                catalog[i].name_addr = name_addr - sizeof(FileName);
+            }
+        }
+    }
 
     if (name_block.name_count == 0) {
         // remove block
@@ -633,7 +646,7 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
 
     // update catalog
     if (catalog[file_index].name_type == 1) {
-        remove_filename_from_disk(disk, &header, name_copy, block_bitmap);
+        remove_filename_from_disk(disk, &header, name_copy, catalog, block_bitmap);
     }
 
     for (unsigned i = file_index; i < header.file_count - 1; i++) {
@@ -644,6 +657,10 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
     header.file_count--;
     if (first_block < header.first_free_block) {
         header.first_free_block = first_block;
+    }
+
+    if (header.file_count < header.max_files) {
+        memset(&catalog[header.file_count], 0, (header.max_files - header.file_count) * sizeof(FileEntry));
     }
 
     // write back
@@ -861,7 +878,7 @@ void ls(const char *diskname, char arg) {
 
 void bad_usage() {
     printf("Usage: ./disk_manager <command> <args>\n");
-    printf("For more information, check the manual");
+    printf("For more information, check the manual\n");
     exit(EXIT_FAILURE);
 }
 
@@ -894,62 +911,63 @@ int main(int argc, char *argv[]) {
         bad_usage();
     }
 
-    if (strcmp(argv[1], "create")) {
+    if (strcmp(argv[1], "create") == 0) {
         //handle create
         if (argc != 4) bad_usage();
         create_virtual_disk(argv[2], atoi(argv[3]));
     }
-    else if (strcmp(argv[1], "cp")) {
+    else if (strcmp(argv[1], "cp") == 0) {
         //handle cp
         if (argc != 4) bad_usage();
-        if (strcmp(argv[2], "-in")) {
+        if (strcmp(argv[2], "-in") == 0) {
             copy_file_to_disk(load_config("config.txt"), argv[3]);
-        } else if (strcmp(argv[2], "-out")) {
+        } else if (strcmp(argv[2], "-out") == 0) {
             copy_file_outside(load_config("config.txt"), argv[3]);
         } else {
             bad_usage();
         }
         unload_config(load_config("config.txt"));
     }
-    else if (strcmp(argv[1], "rm")) {
+    else if (strcmp(argv[1], "rm") == 0) {
         //handle rm
         if (argc != 3) bad_usage();
         remove_file_from_disk(load_config("config.txt"), argv[2]);
         unload_config(load_config("config.txt"));
     }
-    else if (strcmp(argv[1], "mount")) {
+    else if (strcmp(argv[1], "mount") == 0) {
         //handle mount
         if (argc != 3) bad_usage();
         save_config(argv[2], "config.txt");
     }
-    else if (strcmp(argv[1], "unmount")) {
+    else if (strcmp(argv[1], "unmount") == 0) {
         //handle unmount
         if (argc != 2) bad_usage();
         remove_disk(load_config("config.txt"));
         clear_config("config.txt");
         unload_config(load_config("config.txt"));
     }
-    else if (strcmp(argv[1], "info")) {
+    else if (strcmp(argv[1], "info") == 0) {
         //handle info
         if (argc != 2) bad_usage();
         display_disk(load_config("config.txt"));
         unload_config(load_config("config.txt"));
     }
-    else if (strcmp(argv[1], "ls")) {
+    else if (strcmp(argv[1], "ls") == 0) {
         //handle ls
         if (argc > 3) bad_usage();
         if (argc == 2) {
             ls(load_config("config.txt"), 'n');
         } else {
-            if (strcmp(argv[2], "-a")) {
+            if (strcmp(argv[2], "-a") == 0) {
+                ls(load_config("config.txt"), 'a');
+            } else {
                 bad_usage();
             }
-            ls(load_config("config.txt"), 'a');
         }
         unload_config(load_config("config.txt"));
 
     }
-    else if (strcmp(argv[1], "man")) {
+    else if (strcmp(argv[1], "man") == 0) {
         man();
     }
     return 0;

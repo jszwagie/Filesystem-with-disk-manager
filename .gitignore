@@ -9,3 +9,8 @@ wskazowki.txt
 *.s
 temp
 .a
+.plik_*
+temp2
+second
+.vscode
+temp3
