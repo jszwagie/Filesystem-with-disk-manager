@@ -2,10 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <sys/ioctl.h>
+#include <unistd.h>
 
-# define BLOCK_SIZE 4096
-# define MAX_FILENAME_BYTES 64
+#define BLOCK_SIZE 4096
+#define MAX_FILENAME_BYTES 64
 
 typedef struct {
     uint32_t disk_size;
@@ -19,34 +19,34 @@ typedef struct {
 } DiskHeader; // 32 bytes
 
 typedef struct {
-    uint8_t file_type; // 1: hidden, 0: regular
+    uint32_t file_type; // 1: hidden, 0: regular
     uint32_t file_size;
     uint32_t first_block_addr;
-    uint8_t name_type; // 1: addressable, 0: inline
+    //uint16_t name_type; // 1: addressable, 0: inline
     uint32_t name_addr;
-} FileEntry; // 14 bytes
+} FileEntry; // 16 bytes
 
 typedef struct {
-    uint8_t block_type; // 0: file, 1: name
+    uint32_t block_type; // 0: file, 1: name
     uint32_t next_block_addr;
-    uint8_t data[BLOCK_SIZE - 5];
-} Block; // 5 bytes
+    uint8_t data[BLOCK_SIZE - 8];
+} Block; // 4096 bytes
 
-typedef struct {
-    uint8_t block_type; // 0: file, 1: name
-    uint32_t next_block_addr;
-    uint32_t name_count;
-    uint8_t data[BLOCK_SIZE - 9];
-} NameBlock;
+
+unsigned min(unsigned a, unsigned b) {
+    return a < b ? a : b;
+}
 
 
 uint32_t map_name_to_uint(const char *str) {
     uint32_t result = 0;
-    for (unsigned i = 0; i < 4 && i < strlen(str); i++) {
+    unsigned len = strlen(str);
+    for (unsigned i = 0; i < 4 && i < len; i++) {
         result |= ((uint8_t)str[i] << (8 * i));
     }
     return result;
 }
+
 
 char* map_uint_to_str(uint32_t addr) {
     static char str[5];
@@ -58,69 +58,127 @@ char* map_uint_to_str(uint32_t addr) {
 }
 
 
-unsigned calculate_number_of_blocks(unsigned given_size) { // in bytes
-    int is_enough = 0;
-    int temp_size;
-    unsigned disk_size = given_size;
-    disk_size -= sizeof(DiskHeader);
-    unsigned max_bloks = disk_size / (BLOCK_SIZE);
-    while(!is_enough) {
-        temp_size = given_size - max_bloks * BLOCK_SIZE;
-        temp_size -= sizeof(DiskHeader);
-        temp_size -= max_bloks * sizeof(FileEntry);
-        temp_size -= max_bloks; // bitmap
-        if(temp_size >= 0) {
-            is_enough = 1;
-        } else {
-            max_bloks--;
-        }
+unsigned calculate_number_of_blocks(unsigned given_size) {
+    unsigned disk_size = given_size - sizeof(DiskHeader);
+    unsigned max_blocks = disk_size / BLOCK_SIZE;
+    while ((disk_size - (max_blocks * BLOCK_SIZE) - max_blocks * sizeof(FileEntry) - max_blocks) < 0) {
+        max_blocks--;
     }
-    return max_bloks;
+    return max_blocks;
+}
+
+
+void show_binary(const char *filename, const char *binary_filename) {
+    int byte_count = 0;
+    uint8_t byte;
+    FILE *disk = fopen(filename, "rb");
+    FILE *binary = fopen(binary_filename, "w");
+    if (!disk) {
+        perror("Error opening virtual disk");
+        exit(EXIT_FAILURE);
+    }
+    while (!feof(disk)) {
+        fread(&byte, sizeof(uint8_t), 1, disk);
+        fprintf(binary, "%02X ", byte); // Wypisanie bajtu w formacie szesnastkowym
+        byte_count++;
+        if (byte_count % 16 == 0) fprintf(binary, "\n"); // Nowa linia co 16 bajtów
+    }
+
+    fclose(disk);
+    fclose(binary);
+}
+
+
+void show_chars(const char *filename, const char *chars_filename) {
+    int byte_count = 0;
+    uint8_t byte;
+    FILE *disk = fopen(filename, "rb");
+    FILE *chars = fopen(chars_filename, "w");
+    if (!disk) {
+        perror("Error opening virtual disk");
+        exit(EXIT_FAILURE);
+    }
+    while (!feof(disk)) {
+        fread(&byte, sizeof(uint8_t), 1, disk);
+        if (byte == 0) byte = '.'; // Zamiana bajtów zerowych na kropki
+        if (byte < 32 || byte > 126 && byte != '.') byte = '*'; // Zamiana znaków niebędących znakami ASCII na gwiazdki
+        fprintf(chars, "%c", byte); // Wypisanie bajtu jako znaku
+        byte_count++;
+        if (byte_count % 16 == 0) fprintf(chars, "\n"); // Nowa linia co 16 bajtów
+    }
+
+    fclose(disk);
+    fclose(chars);
 }
 
 
 void create_virtual_disk(const char *filename, unsigned size) {
+    unsigned num_blocks = calculate_number_of_blocks(size);
+    unsigned padding_for_bitmap = num_blocks + 8 - num_blocks % 8 - num_blocks;
+    DiskHeader header;
+
     FILE *disk = fopen(filename, "wb");
     if (!disk) {
         perror("Error creating virtual disk");
         exit(EXIT_FAILURE);
     }
+    // calculate padding, add padding to the number of blocks
 
-    unsigned num_blocks = calculate_number_of_blocks(size);
-    DiskHeader header;
     header.disk_size = size;
     header.max_files = num_blocks;
-    header.first_block_addr = sizeof(DiskHeader) + num_blocks + num_blocks * sizeof(FileEntry);
-    header.first_free_block = sizeof(DiskHeader) + num_blocks + num_blocks * sizeof(FileEntry);
+    header.file_count = 0;
+    header.first_block_addr = sizeof(DiskHeader) + num_blocks + padding_for_bitmap + num_blocks * sizeof(FileEntry);
+    header.first_free_block = sizeof(DiskHeader) + num_blocks + padding_for_bitmap + num_blocks * sizeof(FileEntry);
     header.name_block_addr = 0;
-    header.catalog_addr = sizeof(DiskHeader) + num_blocks;
+    header.catalog_addr = sizeof(DiskHeader) + num_blocks + padding_for_bitmap;
     header.catalog_size = num_blocks * sizeof(FileEntry);
 
-    uint8_t block_bitmap[num_blocks];
-    FileEntry catalog[num_blocks];
-    memset(block_bitmap, 0, num_blocks);
+    uint8_t *block_bitmap = malloc(num_blocks + padding_for_bitmap);
+    if (!block_bitmap) {
+        perror("Error allocating memory for block bitmap");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
+
+    FileEntry *catalog = malloc(num_blocks * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        free(block_bitmap);
+        exit(EXIT_FAILURE);
+    }
+    memset(block_bitmap, 0, num_blocks + padding_for_bitmap);
     memset(catalog, 0, num_blocks * sizeof(FileEntry));
 
-    Block block[num_blocks];
-    memset(block, 0, num_blocks * sizeof(Block));
-
     fwrite(&header, sizeof(DiskHeader), 1, disk);
-    fwrite(block_bitmap, num_blocks, 1, disk);
-    fwrite(block, num_blocks * sizeof(Block), 1, disk);
+    fwrite(block_bitmap, num_blocks + padding_for_bitmap, 1, disk);
     fwrite(catalog, num_blocks * sizeof(FileEntry), 1, disk);
 
-    fclose(disk);
+    unsigned unallocated_space = size - ftell(disk);
+
+    if (unallocated_space > 0) {
+        uint8_t zero = 0;
+        for (unsigned i = 0; i < unallocated_space; i++) {
+            fwrite(&zero, sizeof(uint8_t), 1, disk);
+        }
     }
+
+    fclose(disk);
+    free(block_bitmap);
+    free(catalog);
+
+}
 
 
 void display_disk(const char *filename) {
+    DiskHeader header;
+    uint8_t block_status;
     FILE *disk = fopen(filename, "rb");
     if (!disk) {
         perror("Error opening virtual disk");
         exit(EXIT_FAILURE);
     }
 
-    DiskHeader header;
     fread(&header, sizeof(DiskHeader), 1, disk);
 
     printf("=== Disk Header ===\n");
@@ -140,7 +198,6 @@ void display_disk(const char *filename) {
     while (i > 0) {
         printf("|");
         for (unsigned row = 0; row < 100; row++) {
-            uint8_t block_status;
             fread(&block_status, sizeof(uint8_t), 1, disk);
             if (block_status == 0) {
                 printf("0");
@@ -167,101 +224,39 @@ void display_disk(const char *filename) {
         printf("  Type: %s\n", entry.file_type ? "Hidden" : "Regular");
         printf("  Size: %u bytes\n", entry.file_size);
         printf("  First block address: %u\n", entry.first_block_addr);
-        printf("  Name type: %s\n", entry.name_type ? "Addressable" : "Inline");
-        //Print name
+        // printf("  Name type: %s\n", entry.name_type ? "Addressable" : "Inline");
         char name[MAX_FILENAME_BYTES] = {0};
-        if (entry.name_type == 0) { // Inline name
-            strncpy(name, map_uint_to_str(entry.name_addr), MAX_FILENAME_BYTES);
-        } else { // Addressed name
-            fseek(disk, entry.name_addr, SEEK_SET);
-            fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
-            name[MAX_FILENAME_BYTES - 1] = '\0'; // Ensure null-termination
-        }
+        strncpy(name, map_uint_to_str(entry.name_addr), MAX_FILENAME_BYTES);
         printf("  Name: %s\n", name);
     }
 }
 
 
-
-void ls(const char *filename, char arg) {
-    FILE *disk = fopen(filename, "rb");
-    if (!disk) {
-        perror("Error opening virtual disk");
+void copy_file_to_disk(const char *diskname, const char *filename) {
+    FILE *src_file = fopen(filename, "rb");
+    if (!src_file) {
+        perror("Error opening source file");
         exit(EXIT_FAILURE);
     }
-
-    DiskHeader header;
-    fread(&header, sizeof(DiskHeader), 1, disk);
-
-    fseek(disk, header.catalog_addr, SEEK_SET);
-    for (unsigned i = 0; i < header.file_count; i++) {
-        FileEntry entry;
-        fread(&entry, sizeof(FileEntry), 1, disk);
-        if (entry.file_size > 0) {
-            char name[MAX_FILENAME_BYTES] = {0};
-            if (entry.name_type == 0) { // Inline name
-                strncpy(name, map_uint_to_str(entry.name_addr), MAX_FILENAME_BYTES);
-            } else { // Addressed name
-                fseek(disk, entry.name_addr, SEEK_SET);
-                fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
-                name[MAX_FILENAME_BYTES - 1] = '\0'; // Ensure null-termination
-            }
-
-            if (arg == 's') { // Regular files only
-                if (entry.file_type == 0) {
-                    printf("%s %u bytes\n", name, entry.file_size);
-                }
-            } else if (arg == 'a') { // All files, including hidden
-                printf("%s %u bytes\n", name, entry.file_size);
-            } else { // Default: Regular files
-                if (entry.file_type == 0) {
-                    printf("%s %u bytes\n", name, entry.file_size);
-                }
-            }
-        }
-    }
-
-    fclose(disk);
-}
-
-
-
-void copy_to_virtual_disk(const char *diskname, const char *filename) {
     FILE *disk = fopen(diskname, "rb+");
     if (!disk) {
         perror("Error opening virtual disk");
         exit(EXIT_FAILURE);
     }
 
-    FILE *src_file = fopen(filename, "rb");
-    if (!src_file) {
-        perror("Error opening source file");
-        fclose(disk);
-        exit(EXIT_FAILURE);
-    }
-
     // Read disk header
-    DiskHeader header;
+    DiskHeader header = {0};
     fread(&header, sizeof(DiskHeader), 1, disk);
-
-
-    if (header.file_count >= header.max_files) {
-        printf("No space for new files in the catalog.\n");
-        fclose(disk);
-        fclose(src_file);
-        return;
-    }
-
-    // Get source file size
-    fseek(src_file, 0, SEEK_END);
-    uint32_t file_size = ftell(src_file);
-    fseek(src_file, 0, SEEK_SET);
-
-    unsigned required_blocks = (file_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     // Read block bitmap
     fseek(disk, sizeof(DiskHeader), SEEK_SET);
-    uint8_t block_bitmap[header.max_files];
+    uint8_t *block_bitmap = malloc(header.max_files * sizeof(uint8_t));
+    if (!block_bitmap) {
+        perror("Error allocating memory for block bitmap");
+        fclose(disk);
+        fclose(src_file);
+        exit(EXIT_FAILURE);
+    }
     fread(block_bitmap, sizeof(uint8_t), header.max_files, disk);
 
     unsigned free_blocks = 0;
@@ -270,113 +265,94 @@ void copy_to_virtual_disk(const char *diskname, const char *filename) {
             free_blocks++;
         }
     }
+
+    fseek(src_file, 0, SEEK_END);
+    unsigned file_size = ftell(src_file);
+    fseek(src_file, 0, SEEK_SET);
+
+    unsigned data_per_block = BLOCK_SIZE - 8; // Odejmij miejsce na wskaźnik
+    unsigned required_blocks = (file_size + data_per_block - 1) / data_per_block;
+
+    printf("Required blocks: %u\n", required_blocks);
+
     if (free_blocks < required_blocks) {
-        printf("Not enough space on the virtual disk.\n");
+        printf("Not enough free blocks to copy the file.\n");
         fclose(disk);
         fclose(src_file);
+        free(block_bitmap);
         return;
     }
 
-    // Read catalog
+    // read catalog
     fseek(disk, header.catalog_addr, SEEK_SET);
-    FileEntry catalog[header.max_files];
+    FileEntry *catalog = malloc(header.max_files * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        fclose(src_file);
+        free(block_bitmap);
+        exit(EXIT_FAILURE);
+    }
+
     for (unsigned i = 0; i < header.max_files; i++) {
         fread(&catalog[i], sizeof(FileEntry), 1, disk);
     }
 
-    // insert data
-    unsigned first_block = header.first_free_block;
-    unsigned current_block = first_block;
+    // save file to disk
+    unsigned first_block = header.first_block_addr;
+    unsigned first_free_block = header.first_free_block;
+    unsigned current_block = first_free_block;
+    unsigned copy_current_block = first_free_block;
     unsigned next_free_block = 0;
-    unsigned prev_block = 0;
+    // unsigned file_size_copy = file_size;
 
-    for (unsigned i = 0; i < required_blocks; i++) {
+    for (unsigned i = required_blocks; i > 0; i--) {
+        // find next free block
+        copy_current_block = current_block + BLOCK_SIZE;
+        while (block_bitmap[(copy_current_block - first_block) / BLOCK_SIZE] != 0) {
+            copy_current_block += BLOCK_SIZE;
+        }
+        next_free_block = copy_current_block;
+        // go back
 
-        // write data
+        // make a block
         Block block = {0};
         block.block_type = 0;
-        block.next_block_addr = first_block + next_free_block * BLOCK_SIZE;
-        fread(block.data, sizeof(uint8_t), BLOCK_SIZE - 5, src_file);
+        if (i == 1) {
+            block.next_block_addr = 0;
+        } else block.next_block_addr = next_free_block;
+
+        // write data
+        fread(block.data, sizeof(uint8_t), BLOCK_SIZE - 8, src_file);
+
+        // write block to disk
         fseek(disk, current_block, SEEK_SET);
         fwrite(&block, sizeof(Block), 1, disk);
-        block_bitmap[(current_block - header.first_block_addr)/BLOCK_SIZE] = 1;
-        required_blocks--;
 
-        // find next free block
-        for (unsigned j = i; j < header.max_files; j++) {
-            if (block_bitmap[j] == 0) {
-                next_free_block = j;
-                break;
-            }
-        }
+        // update bitmap
+        block_bitmap[(current_block - first_block) / BLOCK_SIZE] = 1;
 
-        prev_block = current_block;
-        current_block = first_block + next_free_block * BLOCK_SIZE;
-
-        if (required_blocks == 0) {
-            break;
-        }
+        current_block = next_free_block;
     }
 
-    // Update catalog
-    // find first free catalog entry
-    unsigned catalog_entry = 0;
-    for (unsigned i = 0; i < header.max_files; i++) {
-        if (catalog[i].file_size == 0) {
-            catalog_entry = i;
-            break;
-        }
-    }
-    // save name in name block
-    if (strlen(filename) > 4) {// filename length
-        // file name saved in block of names
-        catalog[catalog_entry].name_type = 1;
-        fseek(disk, header.name_block_addr, SEEK_SET);
-        if (header.name_block_addr == 0) {
-            header.name_block_addr = header.first_block_addr + next_free_block * BLOCK_SIZE;
-            fseek(disk, header.name_block_addr, SEEK_SET);
-            // write name block
-            NameBlock name_block = {0};
-            name_block.block_type = 1;
-            name_block.next_block_addr = 0;
-            name_block.name_count = 1;
-            strcpy((char *)name_block.data, filename);
-            fwrite(&name_block, sizeof(NameBlock), 1, disk);
-            block_bitmap[next_free_block] = 2;
-            catalog[catalog_entry].name_addr = header.name_block_addr + 9;
-            catalog[catalog_entry].name_type = 1;
-            // find next first free block
-            for (unsigned j = header.name_block_addr/BLOCK_SIZE; j < header.max_files; j++) {
-            if (block_bitmap[j] == 0) {
-                next_free_block = j;
-                break;
-            }
-        }
-        }
-    }
-    else {
-        catalog[catalog_entry].name_type = 0;
-        catalog[catalog_entry].name_addr = map_name_to_uint(filename);
-    }
+    // update catalog
+    unsigned file_index = header.file_count;
+    catalog[file_index].file_type = 0;
+    catalog[file_index].file_size = file_size;
+    catalog[file_index].first_block_addr = first_free_block;
+    catalog[file_index].name_addr = map_name_to_uint(filename);
 
-
-    catalog[catalog_entry].file_type = 0;
-    catalog[catalog_entry].file_size = file_size;
-    catalog[catalog_entry].first_block_addr = first_block;
-
-
-    // Update header
+    // update header
     header.file_count++;
-    header.first_free_block = first_block + next_free_block * BLOCK_SIZE;
-    // Write header back
+    header.first_free_block = current_block;
+
+    // write back
     fseek(disk, 0, SEEK_SET);
     fwrite(&header, sizeof(DiskHeader), 1, disk);
-
-    // Write block bitmap back
     fseek(disk, sizeof(DiskHeader), SEEK_SET);
+
     fwrite(block_bitmap, sizeof(uint8_t), header.max_files, disk);
 
-    // Write catalog back
     fseek(disk, header.catalog_addr, SEEK_SET);
     for (unsigned i = 0; i < header.max_files; i++) {
         fwrite(&catalog[i], sizeof(FileEntry), 1, disk);
@@ -384,45 +360,22 @@ void copy_to_virtual_disk(const char *diskname, const char *filename) {
 
     fclose(disk);
     fclose(src_file);
-
-
-
-
-
-
-
-
-
-}
-
-
-void show_binary(const char *filename, const char *binary_filename) {
-    FILE *disk = fopen(filename, "rb");
-    FILE *binary = fopen(binary_filename, "w");
-    if (!disk) {
-        perror("Error opening virtual disk");
-        exit(EXIT_FAILURE);
-    }
-    while (!feof(disk)) {
-        uint8_t byte;
-        fread(&byte, sizeof(uint8_t), 1, disk);
-        // zapisz bajt jako char do pliku
-        fprintf(binary, "%u", byte);
-    }
-
-    fclose(disk);
+    free(block_bitmap);
+    free(catalog);
 }
 
 
 int main() {
-    unsigned size = 131072;
-    create_virtual_disk("disk", size);
-    //show_binary("disk", "cration.txt");
+    create_virtual_disk("disk", 4096 * 16);
     display_disk("disk");
-    copy_to_virtual_disk("disk", "v.s");
-    //show_binary("disk", "x_copied.txt");
-    copy_to_virtual_disk("disk", "x.txt");
-    //show_binary("disk", "v_copied.txt");
+    copy_file_to_disk("disk", "a.s");
     display_disk("disk");
+    show_chars("disk", "chars.txt");
+    copy_file_to_disk("disk", "w.s");
+    display_disk("disk");
+    show_chars("disk", "chars1.txt");
+    copy_file_to_disk("disk", "b.s");
+    display_disk("disk");
+    show_chars("disk", "chars2.txt");
     return 0;
 }
