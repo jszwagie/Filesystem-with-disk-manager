@@ -847,19 +847,34 @@ void ls(const char *diskname, char arg) {
 }
 
 
+void bad_usage() {
+    printf("Usage: ./disk_manager <command> <diskname> <args>\n");
+    exit(EXIT_FAILURE);
+}
+
+
+void man() {
+    printf("Possible commands:\n");
+    printf("  - create <diskname> <size> # create virtual disk\n");
+    printf("  - cp <-in/-out> <filename> # copy file to/from disk\n");
+    printf("  - rm <filename> # remove file from disk\n");
+    printf("  - unmount <diskname> # remove virtual disk\n");
+    printf("  - info <diskname> # display disk info\n");
+    printf("  - ls <-a> # list files\n");
+}
+
+
 int main(int argc, char *argv[]) {
-    create_virtual_disk("disk", 4096 * 32);
-    printf("=================================\n");
-    copy_file_to_disk("disk", "a.s");
-    copy_file_to_disk("disk", "b.s");
-    copy_file_to_disk("disk", "c.s");
-    copy_file_to_disk("disk", "d.s");
-    copy_file_to_disk("disk", ".a_copied.s");
-    copy_file_to_disk("disk", "a_copied.s");
-    copy_file_to_disk("disk", ".a");
-    copy_file_to_disk("disk", "test.txt");
-    copy_file_to_disk("disk", "k.s");
-    ls("disk", 'a');
-    printf("=================================\n");
-    ls("disk", '_');
+    /* Usage: ./disk_manager <command> <args>
+    Possible commands:
+    - create <diskname> <size> # create virtual disk
+    - cp <-in/-out> <filename> # copy file to/from disk
+    - rm <filename> # remove file from disk
+    - unmount <diskname> # remove virtual disk
+    - info <diskname> # display disk info
+    - ls <-a> # list files
+    - man # display manual
+    */
+    return 0;
+
 }
