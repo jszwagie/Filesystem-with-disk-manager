@@ -795,6 +795,18 @@ void unload_config(char *diskname) {
 }
 
 
+void clear_config(const char *config_filename) {
+    FILE *config = fopen(config_filename, "w");
+    if (!config) {
+        perror("Error opening config file");
+        fclose(config);
+        exit(EXIT_FAILURE);
+    }
+
+    fclose(config);
+}
+
+
 void remove_disk(const char *filename) {
     if (remove(filename) != 0) {
         perror("Error removing virtual disk");
