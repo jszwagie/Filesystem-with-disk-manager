@@ -803,8 +803,63 @@ void remove_disk(const char *filename) {
 }
 
 
+void ls(const char *diskname, char arg) {
+    FILE *disk = fopen(diskname, "rb");
+    if (!disk) {
+        perror("Error opening virtual disk");
+        exit(EXIT_FAILURE);
+    }
 
-int main() {
-    create_virtual_disk("disk", 4096 * 16);
-    return 0;
+    // Read disk header
+    DiskHeader header = {0};
+    fread(&header, sizeof(DiskHeader), 1, disk);
+
+    // read catalog
+    fseek(disk, header.catalog_addr, SEEK_SET);
+    FileEntry *catalog = malloc(header.max_files * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
+    fread(catalog, sizeof(FileEntry), header.max_files, disk);
+
+    // find files
+    for (unsigned i = 0; i < header.file_count; i++) {
+        if (catalog[i].name_type == 0) {
+            char name[4] = {0};
+            strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
+            if (arg == 'a' || name[0] != '.') {
+                printf("%s\n", name);
+            }
+        } else {
+            char name[MAX_FILENAME_BYTES] = {0};
+            fseek(disk, catalog[i].name_addr, SEEK_SET);
+            fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
+            if (arg == 'a' || name[0] != '.') {
+                printf("%s\n", name);
+            }
+        }
+    }
+
+    fclose(disk);
+    free(catalog);
+}
+
+
+int main(int argc, char *argv[]) {
+    create_virtual_disk("disk", 4096 * 32);
+    printf("=================================\n");
+    copy_file_to_disk("disk", "a.s");
+    copy_file_to_disk("disk", "b.s");
+    copy_file_to_disk("disk", "c.s");
+    copy_file_to_disk("disk", "d.s");
+    copy_file_to_disk("disk", ".a_copied.s");
+    copy_file_to_disk("disk", "a_copied.s");
+    copy_file_to_disk("disk", ".a");
+    copy_file_to_disk("disk", "test.txt");
+    copy_file_to_disk("disk", "k.s");
+    ls("disk", 'a');
+    printf("=================================\n");
+    ls("disk", '_');
 }
