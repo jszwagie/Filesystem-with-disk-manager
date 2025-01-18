@@ -447,19 +447,81 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
 }
 
 
+void copy_file_outside(const char *diskname, const char *filename) {
+    FILE *disk = fopen(diskname, "rb+");
+    if (!disk) {
+        perror("Error opening virtual disk");
+        exit(EXIT_FAILURE);
+    }
+
+    FILE *dest_file = fopen(filename, "wb");
+    if (!dest_file) {
+        perror("Error opening destination file");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
+
+    // Read disk header
+    DiskHeader header = {0};
+    fread(&header, sizeof(DiskHeader), 1, disk);
+
+    // Read block bitmap
+    fseek(disk, sizeof(DiskHeader), SEEK_SET);
+    uint8_t *block_bitmap = malloc(header.max_files * sizeof(uint8_t));
+    if (!block_bitmap) {
+        perror("Error allocating memory for block bitmap");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
+    fread(block_bitmap, sizeof(uint8_t), header.max_files, disk);
+
+    // read catalog
+    fseek(disk, header.catalog_addr, SEEK_SET);
+    FileEntry *catalog = malloc(header.max_files * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        free(block_bitmap);
+        exit(EXIT_FAILURE);
+    }
+    fread(catalog, sizeof(FileEntry), header.max_files, disk);
+
+    unsigned file_index = 0;
+    for (unsigned i = 0; i < header.file_count; i++) {
+        char name[4] = {0};
+        strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
+        if (strcmp(name, filename) == 0) {
+            file_index = i;
+            break;
+        }
+    }
+
+    unsigned first_block = catalog[file_index].first_block_addr;
+    unsigned current_block = first_block;
+    unsigned next_block = 0;
+    unsigned file_size = catalog[file_index].file_size;
+    while (current_block != 0) {
+        fseek(disk, current_block, SEEK_SET);
+        Block block = {0};
+        fread(&block, sizeof(Block), 1, disk);
+        next_block = block.next_block_addr;
+        fwrite(block.data, sizeof(uint8_t), min(BLOCK_SIZE - 8, file_size), dest_file);
+        current_block = next_block;
+        file_size -= (min(BLOCK_SIZE - 8, file_size));
+    }
+
+    fclose(disk);
+    fclose(dest_file);
+    free(block_bitmap);
+    free(catalog);
+}
 
 int main() {
     create_virtual_disk("disk", 4096 * 32);
-    copy_file_to_disk("disk", "a.s");
-    copy_file_to_disk("disk", "k.s");
-    copy_file_to_disk("disk", "b.s");
-    copy_file_to_disk("disk", "c.s");
-    copy_file_to_disk("disk", "d.s");
-    //display_disk("disk");
-    remove_file_from_disk("disk", "k.s");
-    remove_file_from_disk("disk", "c.s");
-    display_disk("disk");
     copy_file_to_disk("disk", "w.s");
-    display_disk("disk");
+    // reneame a.s to a_copied.s on linux
+    rename("w.s", "w_copied.s");
+    copy_file_outside("disk", "w.s");
+    // compere w.s and w_copied.s  on linux using diff
     return 0;
 }
