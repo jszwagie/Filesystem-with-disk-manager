@@ -6,6 +6,7 @@
 
 #define BLOCK_SIZE 4096
 #define MAX_FILENAME_BYTES 64
+#define PADDING_FB 16
 
 typedef struct {
     uint32_t disk_size;
@@ -19,10 +20,10 @@ typedef struct {
 } DiskHeader; // 32 bytes
 
 typedef struct {
-    uint32_t file_type; // 1: hidden, 0: regular
+    uint16_t file_type; // 1: hidden, 0: regular
+    uint16_t name_type; // 1: addressable, 0: inline
     uint32_t file_size;
     uint32_t first_block_addr;
-    //uint16_t name_type; // 1: addressable, 0: inline
     uint32_t name_addr;
 } FileEntry; // 16 bytes
 
@@ -32,6 +33,18 @@ typedef struct {
     uint8_t data[BLOCK_SIZE - 8];
 } Block; // 4096 bytes
 
+typedef struct {
+    char FileName[MAX_FILENAME_BYTES];
+} FileName;
+
+typedef struct {
+    uint32_t block_type;
+    uint32_t next_block_addr;
+    uint32_t name_count;
+    FileName names [(BLOCK_SIZE - 12) / sizeof(FileName)];
+} NameBlock;
+
+unsigned MAX_NAME_COUNT = (BLOCK_SIZE - 12) / sizeof(FileName);
 
 unsigned min(unsigned a, unsigned b) {
     return a < b ? a : b;
@@ -114,7 +127,7 @@ void show_chars(const char *filename, const char *chars_filename) {
 
 void create_virtual_disk(const char *filename, unsigned size) {
     unsigned num_blocks = calculate_number_of_blocks(size);
-    unsigned padding_for_bitmap = num_blocks + 8 - num_blocks % 8 - num_blocks;
+    unsigned padding_for_bitmap = num_blocks + PADDING_FB - num_blocks % PADDING_FB - num_blocks;
     DiskHeader header;
 
     FILE *disk = fopen(filename, "wb");
@@ -214,21 +227,93 @@ void display_disk(const char *filename) {
         printf("|\n");
     }
 
+    FileEntry *catalog = malloc(header.max_files * sizeof(FileEntry));
+    if (!catalog) {
+        perror("Error allocating memory for catalog");
+        fclose(disk);
+        exit(EXIT_FAILURE);
+    }
 
-    printf("\n=== Catalog ===\n");
     fseek(disk, header.catalog_addr, SEEK_SET);
+    fread(catalog, header.max_files * sizeof(FileEntry), 1, disk);
+    printf("\n=== Catalog ===\n");
+
     for (unsigned i = 0; i < header.file_count; i++) {
-        FileEntry entry;
-        fread(&entry, sizeof(FileEntry), 1, disk);
         printf("File %u:\n", i + 1);
-        printf("  Type: %s\n", entry.file_type ? "Hidden" : "Regular");
-        printf("  Size: %u bytes\n", entry.file_size);
-        printf("  First block address: %u\n", entry.first_block_addr);
-        // printf("  Name type: %s\n", entry.name_type ? "Addressable" : "Inline");
+        printf("  Type: %s\n", catalog[i].file_type ? "Hidden" : "Regular");
+        printf("  Size: %u bytes\n", catalog[i].file_size);
+        printf("  First block address: %u\n", catalog[i].first_block_addr);
+        printf("  Name type: %s\n", catalog[i].name_type ? "Addressable" : "Inline");
         char name[MAX_FILENAME_BYTES] = {0};
-        strncpy(name, map_uint_to_str(entry.name_addr), MAX_FILENAME_BYTES);
+        if (catalog[i].name_type == 0) {
+            strncpy(name, map_uint_to_str(catalog[i].name_addr), MAX_FILENAME_BYTES);
+        }
+        else {
+            fseek(disk, catalog[i].name_addr, SEEK_SET);
+            printf("  Name address: %u\n", catalog[i].name_addr);
+            fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
+            fseek(disk, header.catalog_addr, SEEK_SET);
+        }
         printf("  Name: %s\n", name);
     }
+
+    free(catalog);
+}
+
+
+uint32_t save_filename_to_disk(FILE *disk, const char *filename, DiskHeader *header, uint8_t *block_bitmap, FileEntry *catalog) {
+    unsigned first_block = header->name_block_addr;
+    unsigned current_block = first_block;
+    unsigned previous_block = 0;
+    unsigned next_block = 0;
+    unsigned name_index = 0;
+    NameBlock prev_name_block = {0};
+    NameBlock name_block = {0};
+    while (current_block != 0) {
+        fseek(disk, current_block, SEEK_SET);
+        fread(&name_block, sizeof(NameBlock), 1, disk);
+        if (name_block.name_count < MAX_NAME_COUNT) {
+            name_index = name_block.name_count;
+            break;
+        }
+        previous_block = current_block;
+        next_block = name_block.next_block_addr;
+        current_block = next_block;
+    }
+
+    if (current_block == 0) {
+        // create new block
+        current_block = header->first_free_block;
+        memset(&name_block, 0, sizeof(NameBlock));
+        name_block.block_type = 1;
+        name_block.next_block_addr = 0;
+        strncpy(name_block.names[0].FileName, filename, MAX_FILENAME_BYTES);
+        block_bitmap[(current_block - header->first_block_addr) / BLOCK_SIZE] = 2;
+        // find next free block
+        unsigned copy_current_block = current_block + BLOCK_SIZE;
+        while (block_bitmap[(copy_current_block - header->first_block_addr) / BLOCK_SIZE] != 0) {
+            copy_current_block += BLOCK_SIZE;
+        }
+        header->first_free_block = copy_current_block;
+        // add address to previous block
+        if (previous_block != 0) {
+            fseek(disk, previous_block, SEEK_SET);
+            fread(&prev_name_block, sizeof(NameBlock), 1, disk);
+            prev_name_block.next_block_addr = current_block;
+            fseek(disk, previous_block, SEEK_SET);
+            fwrite(&prev_name_block, sizeof(NameBlock), 1, disk);
+        } else {
+            header->name_block_addr = current_block;
+        }
+    }
+
+    strncpy(name_block.names[name_index].FileName, filename, MAX_FILENAME_BYTES);
+    name_block.name_count++;
+
+    fseek(disk, current_block, SEEK_SET);
+    fwrite(&name_block, sizeof(NameBlock), 1, disk);
+
+    return current_block + (name_index * sizeof(FileName)) + 3 * sizeof(uint32_t);
 }
 
 
@@ -334,16 +419,27 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
         current_block = next_free_block;
     }
 
-    // update catalog
-    unsigned file_index = header.file_count;
-    catalog[file_index].file_type = 0;
-    catalog[file_index].file_size = file_size;
-    catalog[file_index].first_block_addr = first_free_block;
-    catalog[file_index].name_addr = map_name_to_uint(filename);
-
     // update header
     header.file_count++;
     header.first_free_block = current_block;
+
+    // update catalog
+    unsigned file_index = header.file_count - 1;
+    catalog[file_index].file_type = 0;
+    catalog[file_index].file_size = file_size;
+    catalog[file_index].first_block_addr = first_free_block;
+    if (strlen(filename) < 4) {
+        catalog[file_index].name_addr = map_name_to_uint(filename);
+        catalog[file_index].name_type = 0;
+    } else {
+        uint32_t address;
+        // save filename to disk
+        address = save_filename_to_disk(disk, filename, &header, block_bitmap, catalog);
+        catalog[file_index].name_addr = address;
+        catalog[file_index].name_type = 1;
+    }
+
+
 
     // write back
     fseek(disk, 0, SEEK_SET);
@@ -361,6 +457,64 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
     fclose(src_file);
     free(block_bitmap);
     free(catalog);
+}
+
+
+void remove_filename_from_disk(FILE *disk,  DiskHeader *header, const char *filename, uint8_t *block_bitmap) {
+
+    unsigned name_index = 0;
+    unsigned first_block = header->name_block_addr;
+    unsigned current_block = first_block;
+    unsigned previous_block = 0;
+    int found = 0;
+    NameBlock name_block = {0};
+    while (current_block != 0) {
+        fseek(disk, current_block, SEEK_SET);
+        fread(&name_block, sizeof(NameBlock), 1, disk);
+        for (unsigned i = 0; i < name_block.name_count; i++) {
+            char name[MAX_FILENAME_BYTES] = {0};
+            strncpy(name, name_block.names[i].FileName, MAX_FILENAME_BYTES);
+            if (strcmp(name, filename) == 0) {
+                name_index = i;
+                found = 1;
+                break;
+            }
+        }
+        if (found == 0) {
+            previous_block = current_block;
+            current_block = name_block.next_block_addr;
+        } else {
+            break;
+        }
+    }
+
+    // remove name from block
+    for (unsigned i = name_index; i < name_block.name_count - 1; i++) {
+        name_block.names[i] = name_block.names[i + 1];
+    }
+    name_block.name_count--;
+
+    if (name_block.name_count == 0) {
+        // remove block
+        if (previous_block != 0) {
+            fseek(disk, previous_block, SEEK_SET);
+            NameBlock prev_block = {0};
+            fread(&prev_block, sizeof(NameBlock), 1, disk);
+            prev_block.next_block_addr = 0;
+            block_bitmap[(current_block - header->first_block_addr) / BLOCK_SIZE] = 0;
+            fseek(disk, previous_block, SEEK_SET);
+            fwrite(&prev_block, sizeof(NameBlock), 1, disk);
+            header->name_block_addr = previous_block;
+        } else {
+            header->name_block_addr = 0;
+            block_bitmap[(current_block - header->first_block_addr) / BLOCK_SIZE] = 0;
+        }
+    } else {
+        // write back
+        fseek(disk, current_block, SEEK_SET);
+        fwrite(&name_block, sizeof(NameBlock), 1, disk);
+    }
+
 }
 
 
@@ -396,15 +550,29 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
     }
     fread(catalog, sizeof(FileEntry), header.max_files, disk);
 
+    char *name_copy = malloc(MAX_FILENAME_BYTES);
+
     unsigned file_index = 0;
     for (unsigned i = 0; i < header.file_count; i++) {
-        char name[4] = {0};
-        strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
-        if (strcmp(name, filename) == 0) {
-            file_index = i;
-            break;
+        if (catalog[i].name_type == 0) {
+            char name[4] = {0};
+            strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
+            if (strcmp(name, filename) == 0) {
+                file_index = i;
+                break;
+            }
+        } else {
+            char name[MAX_FILENAME_BYTES] = {0};
+            fseek(disk, catalog[i].name_addr, SEEK_SET);
+            fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
+            if (strcmp(name, filename) == 0) {
+                file_index = i;
+                name_copy = name;
+                break;
+            }
         }
     }
+
 
     unsigned first_block = catalog[file_index].first_block_addr;
     unsigned current_block = first_block;
@@ -419,6 +587,10 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
     }
 
     // update catalog
+    if (catalog[file_index].name_type == 1) {
+        remove_filename_from_disk(disk, &header, name_copy, block_bitmap);
+    }
+
     for (unsigned i = file_index; i < header.file_count - 1; i++) {
         catalog[i] = catalog[i + 1];
     }
@@ -488,11 +660,21 @@ void copy_file_outside(const char *diskname, const char *filename) {
 
     unsigned file_index = 0;
     for (unsigned i = 0; i < header.file_count; i++) {
-        char name[4] = {0};
-        strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
-        if (strcmp(name, filename) == 0) {
-            file_index = i;
-            break;
+        if (catalog[i].name_type == 0) {
+            char name[4] = {0};
+            strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
+            if (strcmp(name, filename) == 0) {
+                file_index = i;
+                break;
+            }
+        } else {
+            char name[MAX_FILENAME_BYTES] = {0};
+            fseek(disk, catalog[i].name_addr, SEEK_SET);
+            fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
+            if (strcmp(name, filename) == 0) {
+                file_index = i;
+                break;
+            }
         }
     }
 
@@ -516,12 +698,17 @@ void copy_file_outside(const char *diskname, const char *filename) {
     free(catalog);
 }
 
+
 int main() {
-    create_virtual_disk("disk", 4096 * 32);
-    copy_file_to_disk("disk", "w.s");
-    // reneame a.s to a_copied.s on linux
-    rename("w.s", "w_copied.s");
-    copy_file_outside("disk", "w.s");
-    // compere w.s and w_copied.s  on linux using diff
+    create_virtual_disk("disk", 4096 * 100);
+    for (int i = 0; i < 63; i++)
+        copy_file_to_disk("disk", "a_copied.s");
+    copy_file_to_disk("disk", "b_copied.s");
+    display_disk("disk");
+    show_chars("disk", "chars1.txt");
+
+    remove_file_from_disk("disk", "b_copied.s");
+    display_disk("disk");
+    show_chars("disk", "chars.txt");
     return 0;
 }
