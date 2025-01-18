@@ -71,10 +71,10 @@ char* map_uint_to_str(uint32_t addr) {
 }
 
 
-unsigned calculate_number_of_blocks(unsigned given_size) {
-    unsigned disk_size = given_size - sizeof(DiskHeader);
-    unsigned max_blocks = disk_size / BLOCK_SIZE;
-    while ((disk_size - (max_blocks * BLOCK_SIZE) - max_blocks * sizeof(FileEntry) - max_blocks) < 0) {
+int calculate_number_of_blocks(unsigned given_size) {
+    int disk_size = given_size - sizeof(DiskHeader);
+    int max_blocks = disk_size / BLOCK_SIZE;
+    while ((disk_size - (max_blocks * BLOCK_SIZE) - max_blocks * sizeof(FileEntry) - max_blocks) < 0 && max_blocks >= 0) {
         max_blocks--;
     }
     return max_blocks;
@@ -92,9 +92,9 @@ void show_binary(const char *filename, const char *binary_filename) {
     }
     while (!feof(disk)) {
         fread(&byte, sizeof(uint8_t), 1, disk);
-        fprintf(binary, "%02X ", byte); // Wypisanie bajtu w formacie szesnastkowym
+        fprintf(binary, "%02X ", byte);
         byte_count++;
-        if (byte_count % 16 == 0) fprintf(binary, "\n"); // Nowa linia co 16 bajtów
+        if (byte_count % 16 == 0) fprintf(binary, "\n");
     }
 
     fclose(disk);
@@ -113,11 +113,11 @@ void show_chars(const char *filename, const char *chars_filename) {
     }
     while (!feof(disk)) {
         fread(&byte, sizeof(uint8_t), 1, disk);
-        if (byte == 0) byte = '.'; // Zamiana bajtów zerowych na kropki
-        if (byte < 32 || byte > 126 && byte != '.') byte = '*'; // Zamiana znaków niebędących znakami ASCII na gwiazdki
-        fprintf(chars, "%c", byte); // Wypisanie bajtu jako znaku
+        if (byte == 0) byte = '.';
+        if (byte < 32 || byte > 126 && byte != '.') byte = '*';
+        fprintf(chars, "%c", byte);
         byte_count++;
-        if (byte_count % 16 == 0) fprintf(chars, "\n"); // Nowa linia co 16 bajtów
+        if (byte_count % 16 == 0) fprintf(chars, "\n");
     }
 
     fclose(disk);
@@ -127,6 +127,11 @@ void show_chars(const char *filename, const char *chars_filename) {
 
 void create_virtual_disk(const char *filename, unsigned size) {
     unsigned num_blocks = calculate_number_of_blocks(size);
+    if (num_blocks <= 0) {
+        printf("Disk size is too small.\n");
+        exit(EXIT_FAILURE);
+    }
+
     unsigned padding_for_bitmap = num_blocks + PADDING_FB - num_blocks % PADDING_FB - num_blocks;
     DiskHeader header;
 
@@ -250,7 +255,6 @@ void display_disk(const char *filename) {
         }
         else {
             fseek(disk, catalog[i].name_addr, SEEK_SET);
-            printf("  Name address: %u\n", catalog[i].name_addr);
             fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
             fseek(disk, header.catalog_addr, SEEK_SET);
         }
@@ -355,7 +359,7 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
     unsigned file_size = ftell(src_file);
     fseek(src_file, 0, SEEK_SET);
 
-    unsigned data_per_block = BLOCK_SIZE - 8; // Odejmij miejsce na wskaźnik
+    unsigned data_per_block = BLOCK_SIZE - 2 * sizeof(uint32_t);
     unsigned required_blocks = (file_size + data_per_block - 1) / data_per_block;
 
 
@@ -382,13 +386,40 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
         fread(&catalog[i], sizeof(FileEntry), 1, disk);
     }
 
+    // check if file already exists
+    for (unsigned i = 0; i < header.file_count; i++) {
+        if (catalog[i].name_type == 0) {
+            char name[4] = {0};
+            strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
+            if (strcmp(name, filename) == 0) {
+                printf("File already exists.\n");
+                fclose(disk);
+                fclose(src_file);
+                free(block_bitmap);
+                free(catalog);
+                return;
+            }
+        } else {
+            char name[MAX_FILENAME_BYTES] = {0};
+            fseek(disk, catalog[i].name_addr, SEEK_SET);
+            fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
+            if (strcmp(name, filename) == 0) {
+                printf("File already exists.\n");
+                fclose(disk);
+                fclose(src_file);
+                free(block_bitmap);
+                free(catalog);
+                return;
+            }
+        }
+    }
+
     // save file to disk
     unsigned first_block = header.first_block_addr;
     unsigned first_free_block = header.first_free_block;
     unsigned current_block = first_free_block;
     unsigned copy_current_block = first_free_block;
     unsigned next_free_block = 0;
-    // unsigned file_size_copy = file_size;
 
     for (unsigned i = required_blocks; i > 0; i--) {
         // find next free block
@@ -425,7 +456,10 @@ void copy_file_to_disk(const char *diskname, const char *filename) {
 
     // update catalog
     unsigned file_index = header.file_count - 1;
-    catalog[file_index].file_type = 0;
+    if (filename[0] == '.')
+        catalog[file_index].file_type = 1;
+    else
+        catalog[file_index].file_type = 0;
     catalog[file_index].file_size = file_size;
     catalog[file_index].first_block_addr = first_free_block;
     if (strlen(filename) < 4) {
@@ -552,6 +586,7 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
 
     char *name_copy = malloc(MAX_FILENAME_BYTES);
 
+    int found = 0;
     unsigned file_index = 0;
     for (unsigned i = 0; i < header.file_count; i++) {
         if (catalog[i].name_type == 0) {
@@ -559,6 +594,7 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
             strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
             if (strcmp(name, filename) == 0) {
                 file_index = i;
+                found = 1;
                 break;
             }
         } else {
@@ -567,10 +603,19 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
             fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
             if (strcmp(name, filename) == 0) {
                 file_index = i;
+                found = 1;
                 name_copy = name;
                 break;
             }
         }
+    }
+
+    if (found == 0) {
+        printf("File not found.\n");
+        fclose(disk);
+        free(block_bitmap);
+        free(catalog);
+        return;
     }
 
 
@@ -658,6 +703,7 @@ void copy_file_outside(const char *diskname, const char *filename) {
     }
     fread(catalog, sizeof(FileEntry), header.max_files, disk);
 
+    int found = 0;
     unsigned file_index = 0;
     for (unsigned i = 0; i < header.file_count; i++) {
         if (catalog[i].name_type == 0) {
@@ -665,6 +711,7 @@ void copy_file_outside(const char *diskname, const char *filename) {
             strncpy(name, map_uint_to_str(catalog[i].name_addr), sizeof(uint32_t));
             if (strcmp(name, filename) == 0) {
                 file_index = i;
+                found = 1;
                 break;
             }
         } else {
@@ -673,9 +720,18 @@ void copy_file_outside(const char *diskname, const char *filename) {
             fread(name, sizeof(char), MAX_FILENAME_BYTES, disk);
             if (strcmp(name, filename) == 0) {
                 file_index = i;
+                found = 1;
                 break;
             }
         }
+    }
+
+    if (found == 0) {
+        printf("File not found.\n");
+        fclose(disk);
+        free(block_bitmap);
+        free(catalog);
+        return;
     }
 
     unsigned first_block = catalog[file_index].first_block_addr;
@@ -699,16 +755,56 @@ void copy_file_outside(const char *diskname, const char *filename) {
 }
 
 
-int main() {
-    create_virtual_disk("disk", 4096 * 100);
-    for (int i = 0; i < 63; i++)
-        copy_file_to_disk("disk", "a_copied.s");
-    copy_file_to_disk("disk", "b_copied.s");
-    display_disk("disk");
-    show_chars("disk", "chars1.txt");
+void save_config(char *diskname, const char *config_filename) {
+    FILE *config = fopen(config_filename, "w");
+    if (!config) {
+        perror("Error opening config file");
+        fclose(config);
+        exit(EXIT_FAILURE);
+    }
 
-    remove_file_from_disk("disk", "b_copied.s");
-    display_disk("disk");
-    show_chars("disk", "chars.txt");
+    fwrite(diskname, sizeof(char), strlen(diskname), config);
+
+    fclose(config);
+}
+
+
+char *load_config(const char *config_filename) {
+    FILE *config = fopen(config_filename, "r");
+    if (!config) {
+        perror("Error opening config file");
+        exit(EXIT_FAILURE);
+    }
+
+    char *diskname = malloc(256);
+    if (!diskname) {
+        perror("Error allocating memory for diskname");
+        fclose(config);
+        exit(EXIT_FAILURE);
+    }
+
+    fread(diskname, sizeof(char), 256, config);
+
+    fclose(config);
+    return diskname;
+}
+
+
+void unload_config(char *diskname) {
+    free(diskname);
+}
+
+
+void remove_disk(const char *filename) {
+    if (remove(filename) != 0) {
+        perror("Error removing virtual disk");
+        exit(EXIT_FAILURE);
+    }
+}
+
+
+
+int main() {
+    create_virtual_disk("disk", 4096 * 16);
     return 0;
 }
