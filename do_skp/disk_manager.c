@@ -642,7 +642,6 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
     unsigned next_block;
     char *name_copy;
     Block *block;
-    printf("Start to remove");
     if (!disk) {
         perror("Error opening virtual disk");
         exit(EXIT_FAILURE);
@@ -677,7 +676,6 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
     }
     fread(catalog, sizeof(FileEntry), header.max_files, disk);
 
-    printf("Szukanie nazwy");
     name_copy = malloc(MAX_FILENAME_BYTES);
 
     for (i = 0; i < header.file_count; i++) {
@@ -708,7 +706,6 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
         return;
     }
 
-    printf("Usuwam");
     first_block = catalog[file_index].first_block_addr;
     current_block = first_block;
     next_block = 0;
@@ -719,7 +716,6 @@ void remove_file_from_disk(const char *diskname, const char *filename) {
         block_bitmap[(current_block - header.first_block_addr) / BLOCK_SIZE] = 0;
         current_block = next_block;
     }
-    printf("Usuwanie nazwy");
     /* update catalog*/
     if (catalog[file_index].name_type == 1) {
         remove_filename_from_disk(disk, &header, name_copy, catalog, block_bitmap);
