@@ -1,11 +1,11 @@
 #!/bin/sh
 
-echo "plik ukryty" > .plik_ukryty
-echo "plik a" > a.s
-echo "plik b" > b.s
-echo "Ala ma kota" > ala_ma_kota.txt
-echo "minix file" > minix_file.txt
-echo "plik z długą nazwą" > "Długa nazwa.txt"
+echo "hidden file" > .hidden_file
+echo "file a" > a.s
+echo "file b" > b.s
+echo "Alice has a cat" > alice_has_a_cat.txt
+echo "test file" > test_file.txt
+echo "file with a long name" > "Very long name with spaces.txt"
 echo "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Suspendisse consectetur quis urna eu laoreet. Integer id mollis augue, nec egestas quam. Praesent sed sapien orci. Mauris molestie vulputate egestas. Maecenas viverra justo purus, non interdum augue pulvinar a. Phasellus condimentum lectus ut elementum efficitur. Vestibulum massa purus, convallis placerat arcu scelerisque, tempus vehicula mauris. Donec eu nisi nec lacus congue lacinia ut a augue. Curabitur ultricies sollicitudin finibus. Suspendisse lacinia lorem ligula, sit amet venenatis augue eleifend vitae.
 
 Mauris volutpat euismod velit, at molestie augue fringilla sed. Morbi eget gravida libero. Integer eros orci, feugiat ac ipsum a, fermentum lacinia massa. Nullam eu libero ac dui rhoncus sodales. Donec euismod imperdiet lacus, nec sollicitudin nisl congue nec. Vivamus non faucibus metus. Nam vitae varius lectus. Fusce cursus enim ante, ut placerat velit dignissim eu.
